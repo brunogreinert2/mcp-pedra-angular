@@ -170,5 +170,21 @@ def atualizar_catalogo() -> str:
     return msg
 
 
+@mcp.tool()
+def atualizar_obra(id_obra: str) -> str:
+    """Força reler AGORA uma obra específica do site, ignorando o cache (que
+    por padrão guarda o conteúdo de uma obra indefinidamente, assumindo que
+    texto publicado é estável). Use quando o usuário disser que editou uma
+    obra específica e a ferramenta parece não estar vendo a mudança."""
+    obra = next((o for o in cliente.catalogo() if o.id == id_obra), None)
+    if obra is None:
+        return f"Nenhuma obra com id='{id_obra}' no catálogo."
+    try:
+        cliente.conteudo_bruto(obra.arquivo, forcar_atualizacao=True)
+    except Exception as e:
+        return f"Erro ao atualizar: {e}"
+    return f"'{obra.titulo}' relido do site agora, cache antigo descartado."
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
