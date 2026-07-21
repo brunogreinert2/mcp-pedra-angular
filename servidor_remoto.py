@@ -52,6 +52,26 @@ mcp = FastMCP(
 )
 
 
+@mcp.custom_route("/", methods=["GET"])
+async def saude(request):
+    """Página simples pra confirmar visualmente, no navegador, que o
+    servidor está de pé. O endpoint de verdade (/mcp) só responde a POST
+    no protocolo MCP -- por isso ele sozinho dá 'Not Found' no navegador,
+    o que é esperado, não um sinal de erro."""
+    from starlette.responses import PlainTextResponse
+    try:
+        n = len(cliente.catalogo())
+        status = f"{n} obras carregadas no catálogo."
+    except Exception as e:
+        status = f"catálogo ainda não carregado ou com erro: {e}"
+    return PlainTextResponse(
+        "Pedra Angular MCP -- servidor no ar.\n"
+        f"{status}\n"
+        "O endpoint /mcp só responde ao protocolo MCP (via Claude), "
+        "não a um navegador comum -- 'Not Found' ali é esperado."
+    )
+
+
 @mcp.tool()
 def listar_filhos(caminho: list[str] = []) -> str:
     """Navega a árvore do corpus por título, sem carregar texto — barato,
