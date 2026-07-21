@@ -26,7 +26,7 @@ from mcp.server.fastmcp import FastMCP
 from pedra_mcp.cliente import (
     ClientePedraAngular, construir_arvore, listar_nivel,
     separar_frontmatter, buscar_lexical, resolver_citacao,
-    extrair_trecho_por_ancora, BASE_URL,
+    extrair_trecho_por_ancora, ferramenta_ler_trecho, BASE_URL,
 )
 
 BASE = os.environ.get("PEDRA_ANGULAR_BASE_URL", BASE_URL)
@@ -94,47 +94,17 @@ def listar_filhos(caminho: list[str] = []) -> str:
 
 @mcp.tool()
 def ler_trecho_exato(id_obra: str = "", citacao: str = "") -> str:
-    """Lê um trecho exato — pelo id do catálogo OU por citação natural
-    no padrão 'Gn 1:1'. Devolve o texto E o metadado (tradutor, fonte,
-    licença) para nunca citar sem saber de qual tradução/edição veio.
-    Se a citação bater com mais de uma tradução, lista as opções."""
-    if citacao and not id_obra:
-        resolvido = resolver_citacao(citacao, cliente.catalogo())
-        if resolvido is None:
-            return (f"Não reconheci '{citacao}' como citação bíblica (padrão 'Gn 1:1'). "
-                    f"Para obras clássicas, use id_obra (via listar_filhos ou buscar_no_corpus).")
-        candidatos = resolvido["candidatos"]
-        if len(candidatos) > 1:
-            linhas = [f"'{citacao}' bate com mais de uma tradução — escolha uma (id_obra):"]
-            for c in candidatos:
-                linhas.append(f"  - [{c.id}] {c.titulo}")
-            return "\n".join(linhas)
-        obra = candidatos[0]
-        bruto = cliente.conteudo_bruto(obra.arquivo)
-        meta, corpo = separar_frontmatter(bruto)
-        trecho = extrair_trecho_por_ancora(corpo, resolvido["ancora"])
-        if trecho is None:
-            return f"Obra encontrada ({obra.titulo}), mas '{resolvido['ancora']}' não achou correspondência no texto."
-        return (f"OBRA: {meta.get('title', obra.titulo)}  [{resolvido['coordenada']}]\n"
-                f"TRADUÇÃO: {meta.get('translation') or meta.get('translator')}\n"
-                f"FONTE: {meta.get('source')}\n"
-                f"LICENÇA: {meta.get('license', '(ver source)')}\n---\n" + trecho)
-
-    if not id_obra:
-        return "Informe id_obra ou citacao."
-    obra = next((o for o in cliente.catalogo() if o.id == id_obra), None)
-    if obra is None:
-        return f"Nenhuma obra com id='{id_obra}' no catálogo."
-    try:
-        bruto = cliente.conteudo_bruto(obra.arquivo)
-    except Exception as e:
-        return f"Erro ao buscar o arquivo: {e}"
-    meta, corpo = separar_frontmatter(bruto)
-    return (f"OBRA: {meta.get('title', obra.titulo)}\n"
-            f"AUTOR: {meta.get('author', obra.autor)}\n"
-            f"TRADUÇÃO: {meta.get('translation') or meta.get('translator')}\n"
-            f"FONTE: {meta.get('source')}\n"
-            f"LICENÇA: {meta.get('license', '(ver source)')}\n---\n" + corpo.strip())
+    """Lê um trecho exato — pelo id do catálogo OU por citação natural.
+    Citações bíblicas aceitam qualquer grafia razoável: 'Gn 1:1',
+    'genesis 1,1', 'Gênesis 1.1', 'salmos 23' (capítulo inteiro),
+    '1 corintios 13:4-7' (intervalo), 'primeira coríntios 13,4'.
+    Devolve o texto E o metadado (tradutor, fonte, licença) para nunca
+    citar sem saber de qual tradução/edição veio. Se a citação bater com
+    mais de uma tradução, lista as opções. id_obra também aceita
+    aproximação: id errado/incompleto devolve sugestões."""
+    # Toda a lógica vive em cliente.ferramenta_ler_trecho — compartilhada
+    # com o servidor stdio (servidor.py), para nunca divergirem.
+    return ferramenta_ler_trecho(cliente, id_obra=id_obra or "", citacao=citacao or "")
 
 
 @mcp.tool()
