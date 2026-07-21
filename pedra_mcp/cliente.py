@@ -74,10 +74,19 @@ class ClientePedraAngular:
         self.usar_rede = usar_rede
         _garantir_pastas()
         self._catalogo: Optional[list[Obra]] = None
+        self._catalogo_timestamp: Optional[float] = None
 
     # ---------- catálogo ----------
     def catalogo(self, forcar_atualizacao: bool = False) -> list[Obra]:
-        if self._catalogo is not None and not forcar_atualizacao:
+        # Antes só checava "já tenho em memória?" -- ignorava o TTL depois da
+        # primeira vez, então obra nova no site só aparecia reiniciando o app
+        # inteiro. Agora reconsulta o TTL sempre, mesmo com cache em memória.
+        if (
+            self._catalogo is not None
+            and self._catalogo_timestamp is not None
+            and not forcar_atualizacao
+            and (time.time() - self._catalogo_timestamp) < TTL_CATALOGO_SEGUNDOS
+        ):
             return self._catalogo
 
         usar_cache = (
@@ -100,18 +109,25 @@ class ClientePedraAngular:
             )
 
         self._catalogo = [Obra.de_catalogo(o) for o in dados["livros"]]
+        self._catalogo_timestamp = time.time()
         return self._catalogo
 
     # ---------- conteúdo de uma obra ----------
     def _caminho_cache_arquivo(self, arquivo: str) -> Path:
         return ARQUIVOS_CACHE / arquivo
 
-    def conteudo_bruto(self, arquivo: str) -> str:
-        """Devolve o .md cru (YAML + corpo) de uma obra, cacheado em disco."""
+    def conteudo_bruto(self, arquivo: str, forcar_atualizacao: bool = False) -> str:
+        """Devolve o .md cru (YAML + corpo) de uma obra, cacheado em disco.
+        Cache sem prazo de validade, de propósito (texto publicado costuma
+        ser estável) -- mas isso é ERRADO durante curadoria ativa, quando
+        você está editando YAML/conteúdo. Use forcar_atualizacao=True (ou a
+        ferramenta atualizar_obra) para ignorar o cache dessa obra específica."""
         destino = self._caminho_cache_arquivo(arquivo)
-        if destino.exists():
+        if destino.exists() and not forcar_atualizacao:
             return destino.read_text(encoding="utf-8")
         if not self.usar_rede:
+            if destino.exists():
+                return destino.read_text(encoding="utf-8")  # sem rede -> melhor servir o cache velho que nada
             raise RuntimeError(f"Arquivo não está em cache e rede está desligada: {arquivo}")
         texto = _buscar_url(self.base_url + arquivo)
         destino.parent.mkdir(parents=True, exist_ok=True)
@@ -128,6 +144,7 @@ class ClientePedraAngular:
     def semear_catalogo_local(self, dados_json: dict):
         CATALOGO_CACHE.write_text(json.dumps(dados_json, ensure_ascii=False), encoding="utf-8")
         self._catalogo = [Obra.de_catalogo(o) for o in dados_json["livros"]]
+        self._catalogo_timestamp = time.time()
 
 
 # ---------- parsing: separar YAML do corpo ----------
