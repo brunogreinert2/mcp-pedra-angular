@@ -8,13 +8,27 @@ Fala com o site real (pedraangular.app.br), que já expõe publicamente:
 Nenhuma infraestrutura nova precisa existir — este módulo só lê o que
 o app já publica. Tudo é cacheado localmente em disco, então depois da
 primeira consulta, tudo funciona OFFLINE também.
+
+NOVIDADES DESTA VERSÃO (motor de citações v2):
+  - Citações bíblicas aceitam nome completo, com ou sem acento, e as
+    abreviações tradicionais: 'Gn 1:1', 'genesis 1,1', 'Gênesis 1.1',
+    '1 corintios 13:4', 'primeira coríntios 13,4', 'II Timóteo 1:7'...
+  - Separadores flexíveis entre capítulo e versículo: ':', '.' ou ','.
+  - Intervalos: 'Gn 1:1-3' devolve os três versículos.
+  - Capítulo inteiro: 'Salmos 23' (sem versículo) devolve o capítulo.
+  - id_obra aproximado: id errado/incompleto sugere os mais próximos
+    em vez de responder só "nenhuma obra".
+  - Fallback clássico: citação não-bíblica ('Leviathan cap. 13') tenta
+    casar com títulos do catálogo antes de desistir.
 """
 from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 import urllib.request
 import urllib.error
+from difflib import get_close_matches
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -34,7 +48,7 @@ def _garantir_pastas():
 def _buscar_url(url: str, timeout: int = 15) -> str:
     """Busca uma URL. Levanta erro claro se a rede não estiver disponível —
     nunca inventa conteúdo no lugar de um fetch que falhou."""
-    req = urllib.request.Request(url, headers={"User-Agent": "pedra-angular-mcp/0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "pedra-angular-mcp/0.2"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8")
 
@@ -218,54 +232,241 @@ def buscar_lexical(pergunta: str, obras: list[Obra], cliente: ClientePedraAngula
     return [{"id": o.id, "titulo": o.titulo, "autor": o.autor, "pontos": p} for p, o in pontuados[:top]]
 
 
-# ---------- citação natural ("Gn 1:1") -> id do catálogo + trecho exato ----------
-# Tabela canônica de abreviações da Bíblia em português — mesma lista que
-# qualquer edição impressa usa (Gn=1 ... Ap=66). Não é invenção nossa: é o
-# padrão que o próprio placeholder do app ("Gn 1:1") já pressupõe.
-_LIVROS_BIBLIA = [
-    "Gn","Êx","Lv","Nm","Dt","Js","Jz","Rt","1Sm","2Sm","1Rs","2Rs","1Cr","2Cr",
-    "Ed","Ne","Et","Jó","Sl","Pv","Ec","Ct","Is","Jr","Lm","Ez","Dn","Os","Jl",
-    "Am","Ob","Jn","Mq","Na","Hc","Sf","Ag","Zc","Ml","Mt","Mc","Lc","Jo","At",
-    "Rm","1Co","2Co","Gl","Ef","Fp","Cl","1Ts","2Ts","1Tm","2Tm","Tt","Fm","Hb",
-    "Tg","1Pe","2Pe","1Jo","2Jo","3Jo","Jd","Ap",
+# ======================================================================
+#  MOTOR DE CITAÇÕES v2
+# ======================================================================
+
+def _sem_acentos(t: str) -> str:
+    """'Gênesis' -> 'Genesis'. Base de toda a tolerância a acentuação."""
+    return "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
+
+
+# Tabela canônica: (abreviação tradicional, nome completo, aliases extras).
+# A abreviação tradicional é a que gera a ÂNCORA no texto (^gn-1-1) — o
+# mesmo padrão do placeholder do app. Os aliases só apontam para ela.
+_NOMES_BIBLIA: list[tuple[str, str, list[str]]] = [
+    ("Gn", "Gênesis", ["Gen"]),
+    ("Êx", "Êxodo", ["Ex", "Exo", "Exod"]),
+    ("Lv", "Levítico", ["Lev"]),
+    ("Nm", "Números", ["Num"]),
+    ("Dt", "Deuteronômio", ["Deut", "Deu"]),
+    ("Js", "Josué", ["Jos"]),
+    ("Jz", "Juízes", ["Juiz", "Juizes"]),
+    ("Rt", "Rute", ["Rut"]),
+    ("1Sm", "1 Samuel", ["1Sa", "1Sam", "1Samuel"]),
+    ("2Sm", "2 Samuel", ["2Sa", "2Sam", "2Samuel"]),
+    ("1Rs", "1 Reis", ["1Re", "1Reis"]),
+    ("2Rs", "2 Reis", ["2Re", "2Reis"]),
+    ("1Cr", "1 Crônicas", ["1Cro", "1Cron"]),
+    ("2Cr", "2 Crônicas", ["2Cro", "2Cron"]),
+    ("Ed", "Esdras", ["Esd"]),
+    ("Ne", "Neemias", ["Nee"]),
+    ("Et", "Ester", ["Est"]),
+    ("Jó", "Jó", ["Job"]),
+    ("Sl", "Salmos", ["Sal", "Salmo", "Ps"]),
+    ("Pv", "Provérbios", ["Pro", "Prov", "Proverbio", "Proverbios"]),
+    ("Ec", "Eclesiastes", ["Ecl", "Qohelet", "Coelet"]),
+    ("Ct", "Cânticos", ["Cant", "Cantares", "Cantares de Salomão",
+                        "Cântico dos Cânticos", "Cantico dos Canticos"]),
+    ("Is", "Isaías", ["Isa"]),
+    ("Jr", "Jeremias", ["Jer"]),
+    ("Lm", "Lamentações", ["Lam", "Lamentações de Jeremias"]),
+    ("Ez", "Ezequiel", ["Eze", "Ezq"]),
+    ("Dn", "Daniel", ["Dan"]),
+    ("Os", "Oséias", ["Oseias", "Ose"]),
+    ("Jl", "Joel", []),
+    ("Am", "Amós", ["Amo"]),
+    ("Ob", "Obadias", ["Oba", "Abdias"]),
+    ("Jn", "Jonas", ["Jon"]),
+    ("Mq", "Miquéias", ["Miq", "Miqueias"]),
+    ("Na", "Naum", []),
+    ("Hc", "Habacuque", ["Hab", "Habacuc"]),
+    ("Sf", "Sofonias", ["Sof"]),
+    ("Ag", "Ageu", ["Age"]),
+    ("Zc", "Zacarias", ["Zac"]),
+    ("Ml", "Malaquias", ["Mal"]),
+    ("Mt", "Mateus", ["Mat", "Matheus"]),
+    ("Mc", "Marcos", ["Mar", "Marc"]),
+    ("Lc", "Lucas", ["Luc"]),
+    ("Jo", "João", ["Joh", "Joao"]),
+    ("At", "Atos", ["Act", "Atos dos Apóstolos", "Atos dos Apostolos"]),
+    ("Rm", "Romanos", ["Rom"]),
+    ("1Co", "1 Coríntios", ["1Cor", "1Corintios"]),
+    ("2Co", "2 Coríntios", ["2Cor", "2Corintios"]),
+    ("Gl", "Gálatas", ["Gal"]),
+    ("Ef", "Efésios", ["Efe", "Efes"]),
+    ("Fp", "Filipenses", ["Fil", "Flp", "Filip"]),
+    ("Cl", "Colossenses", ["Col"]),
+    ("1Ts", "1 Tessalonicenses", ["1Tes", "1Tess"]),
+    ("2Ts", "2 Tessalonicenses", ["2Tes", "2Tess"]),
+    ("1Tm", "1 Timóteo", ["1Tim", "1Timoteo"]),
+    ("2Tm", "2 Timóteo", ["2Tim", "2Timoteo"]),
+    ("Tt", "Tito", ["Tit"]),
+    ("Fm", "Filemom", ["Filemon", "Flm"]),
+    ("Hb", "Hebreus", ["Heb"]),
+    ("Tg", "Tiago", ["Tia", "Thiago"]),
+    ("1Pe", "1 Pedro", ["1Pd", "1Ped"]),
+    ("2Pe", "2 Pedro", ["2Pd", "2Ped"]),
+    ("1Jo", "1 João", ["1Joao"]),
+    ("2Jo", "2 João", ["2Joao"]),
+    ("3Jo", "3 João", ["3Joao"]),
+    ("Jd", "Judas", ["Jud"]),
+    ("Ap", "Apocalipse", ["Apo", "Apoc", "Revelação", "Revelacao"]),
 ]
+
+# Dois mapas: um sensível a acento (consultado primeiro) e um sem acento
+# (fallback). O motivo de serem DOIS: 'Jó' sem acento vira 'Jo', que é a
+# abreviação de João — só o acento distingue. Consultando o mapa acentuado
+# primeiro, 'jó 1:1' resolve para Jó; e no mapa sem acento, 'jo'/'joao'
+# ficam explicitamente com João (quem quiser Jó sem teclado acentuado
+# escreve 'Job 1:1').
+_ALIAS_ACENTUADO: dict[str, int] = {}
+_ALIAS_SEM_ACENTO: dict[str, int] = {}
+
+
+def _chave_alias(texto: str) -> str:
+    return re.sub(r"[\s\.]+", "", texto.strip().lower())
+
+
+def _registrar_alias(alias: str, numero: int):
+    k = _chave_alias(alias)
+    _ALIAS_ACENTUADO.setdefault(k, numero)
+    _ALIAS_SEM_ACENTO.setdefault(_sem_acentos(k), numero)
+
+
+for _i, (_abrev, _nome, _extras) in enumerate(_NOMES_BIBLIA):
+    _n = _i + 1
+    for _a in [_abrev, _nome] + _extras:
+        _registrar_alias(_a, _n)
+
+# Desempates explícitos no mapa sem acento (colisões conhecidas):
+_ALIAS_SEM_ACENTO["jo"] = 43   # 'Jo' sem acento = João (Jó pede acento, ou 'Job')
+
+# Compatibilidade com código antigo que importa estes nomes:
+_LIVROS_BIBLIA = [t[0] for t in _NOMES_BIBLIA]
 _ABREV_PARA_NUMERO = {abrev.lower(): i + 1 for i, abrev in enumerate(_LIVROS_BIBLIA)}
 
+
+def _normalizar_prefixo_numerado(livro: str) -> str:
+    """'primeira coríntios' -> '1 coríntios'; 'II Timóteo' -> '2 Timóteo';
+    '1ª João' -> '1 João'. Só mexe no PREFIXO, nunca no nome do livro."""
+    t = livro.strip()
+    t = re.sub(r"^(primeir[ao])\b\.?", "1", t, flags=re.IGNORECASE)
+    t = re.sub(r"^(segund[ao])\b\.?", "2", t, flags=re.IGNORECASE)
+    t = re.sub(r"^(terceir[ao])\b\.?", "3", t, flags=re.IGNORECASE)
+    t = re.sub(r"^(iii)\s+", "3 ", t, flags=re.IGNORECASE)
+    t = re.sub(r"^(ii)\s+", "2 ", t, flags=re.IGNORECASE)
+    t = re.sub(r"^(i)\s+", "1 ", t, flags=re.IGNORECASE)
+    t = re.sub(r"^([123])\s*[ªºoa]\b\.?", r"\1", t, flags=re.IGNORECASE)
+    return t
+
+
+def _numero_do_livro(livro: str) -> Optional[int]:
+    """Resolve qualquer grafia razoável de um livro bíblico para seu número
+    canônico (Gn=1 ... Ap=66). None se não for um livro bíblico."""
+    k = _chave_alias(_normalizar_prefixo_numerado(livro))
+    n = _ALIAS_ACENTUADO.get(k)
+    if n is not None:
+        return n
+    return _ALIAS_SEM_ACENTO.get(_sem_acentos(k))
+
+
+# livro (possivelmente com dígito/ordinal na frente e espaços no meio),
+# capítulo, e opcionalmente [separador flexível] versículo [- fim].
 _RX_CITACAO_BIBLICA = re.compile(
-    r"^\s*(\d?\s?[A-Za-zÀ-ÿ]+)\.?\s+(\d+)\s*[:.]\s*(\d+)\s*$"
+    r"^\s*"
+    r"((?:[0-3][ªºoa]?\.?)?\s*[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\.ªº]*?)"   # livro (com ordinal opcional: 1ª, 2º, 1a...)
+    r"\s+(\d{1,3})"                                   # capítulo
+    r"(?:\s*[:.,]\s*(\d{1,3})"                        # : . ou ,  + versículo
+    r"(?:\s*[-–—]\s*(\d{1,3}))?"                      # -fim (intervalo)
+    r")?\s*$"
 )
 
 
 def resolver_citacao(texto: str, obras: list[Obra]) -> Optional[dict]:
     """
-    Tenta interpretar 'texto' como uma citação bíblica no padrão 'Gn 1:1'
-    (o mesmo que o app reconhece). Se conseguir, devolve:
-        {"obra": Obra, "coordenada": "1:1", "ancora": "^gn-1-1"}
-    Não resolve citações de obras clássicas (essas não têm 'abrev' — usa-se
-    ler_trecho_exato com o id do catálogo, ou buscar_no_corpus, para elas).
+    Interpreta 'texto' como citação bíblica em QUALQUER grafia razoável:
+      'Gn 1:1' | 'genesis 1,1' | 'Gênesis 1.1' | 'salmos 23' (capítulo)
+      '1 corintios 13:4-7' (intervalo) | 'primeira coríntios 13,4' ...
+    Devolve:
+      {"candidatos": [Obra...], "numero": 1, "abrev": "Gn",
+       "cap": 1, "v_ini": 1|None, "v_fim": None|int, "coordenada": "1:1"}
+    ou None se não for citação bíblica (aí o chamador tenta o fallback
+    de obras clássicas).
     """
     m = _RX_CITACAO_BIBLICA.match(texto.strip())
     if not m:
         return None
-    abrev_bruto, cap, versiculo = m.groups()
-    abrev_norm = abrev_bruto.replace(" ", "").lower()
-    numero = _ABREV_PARA_NUMERO.get(abrev_norm)
+    livro_bruto, cap_s, v_ini_s, v_fim_s = m.groups()
+    numero = _numero_do_livro(livro_bruto)
     if numero is None:
         return None
 
     candidatos = [o for o in obras if o.id.startswith(f"biblia-{numero:02d}-")]
     if not candidatos:
         return None
-    # se houver mais de uma tradução, todas são candidatas; quem chama decide
-    # (normalmente a IA já sabe qual tradução o usuário está usando)
-    ancora = f"^{abrev_norm}-{cap}-{versiculo}"
-    return {"candidatos": candidatos, "coordenada": f"{cap}:{versiculo}", "ancora": ancora}
+
+    cap = int(cap_s)
+    v_ini = int(v_ini_s) if v_ini_s else None
+    v_fim = int(v_fim_s) if v_fim_s else None
+    if v_ini is not None and v_fim is not None and v_fim < v_ini:
+        v_ini, v_fim = v_fim, v_ini  # 'Gn 1:3-1' -> trata como 1-3
+
+    abrev = _NOMES_BIBLIA[numero - 1][0]
+    if v_ini is None:
+        coordenada = f"{cap}"
+    elif v_fim is not None:
+        coordenada = f"{cap}:{v_ini}-{v_fim}"
+    else:
+        coordenada = f"{cap}:{v_ini}"
+
+    # 'ancora' mantida por compatibilidade com chamadores antigos
+    ancora = f"^{abrev.lower()}-{cap}-{v_ini if v_ini is not None else 1}"
+    return {
+        "candidatos": candidatos, "numero": numero, "abrev": abrev,
+        "cap": cap, "v_ini": v_ini, "v_fim": v_fim,
+        "coordenada": coordenada, "ancora": ancora,
+    }
+
+
+# âncora no fim da linha: ^gn-1-1  (a abreviação pode vir acentuada ou não,
+# dependendo de como o arquivo foi gerado — aceitamos as duas)
+_RX_ANCORA_FIM = re.compile(r"\^([0-9A-Za-zÀ-ÿ]+)-(\d+)-(\d+)\s*$")
+
+
+def extrair_citacao_biblica(
+    corpo: str, abrev: str, cap: int,
+    v_ini: Optional[int] = None, v_fim: Optional[int] = None,
+) -> Optional[str]:
+    """Extrai do corpo os versículos pedidos, guiado pelas âncoras ^ab-cap-v.
+    v_ini=None -> capítulo inteiro. v_fim=None -> um versículo só.
+    Tolera âncora acentuada ('^êx-3-14') e sem acento ('^ex-3-14')."""
+    chaves = {abrev.lower(), _sem_acentos(abrev.lower())}
+    fim = v_fim if v_fim is not None else v_ini
+    achados: list[tuple[int, str]] = []
+    for linha in corpo.split("\n"):
+        m = _RX_ANCORA_FIM.search(linha.rstrip())
+        if not m:
+            continue
+        ab = m.group(1).lower()
+        if ab not in chaves and _sem_acentos(ab) not in chaves:
+            continue
+        c, v = int(m.group(2)), int(m.group(3))
+        if c != cap:
+            continue
+        if v_ini is not None and not (v_ini <= v <= fim):
+            continue
+        achados.append((v, linha[: m.start()].rstrip()))
+    if not achados:
+        return None
+    achados.sort()
+    return "\n".join(t for _, t in achados)
 
 
 def extrair_trecho_por_ancora(corpo: str, ancora: str, contexto_linhas: int = 0) -> Optional[str]:
-    """Acha a linha terminando em '^ancora' e devolve só ela (+ contexto, se pedido).
-    O '^ancora' em si é removido do texto devolvido — é uma referência para
-    máquina (igual ao block-reference do Obsidian), não parte da leitura."""
+    """(mantida por compatibilidade) Acha a linha terminando em '^ancora' e
+    devolve só ela (+ contexto, se pedido). O '^ancora' em si é removido do
+    texto devolvido — é referência para máquina, não parte da leitura."""
     linhas = corpo.split("\n")
     rx_remover_ancora = re.compile(r"\s\^[a-zA-Z0-9\-_]+\s*$", re.MULTILINE)
     for i, linha in enumerate(linhas):
@@ -275,3 +476,135 @@ def extrair_trecho_por_ancora(corpo: str, ancora: str, contexto_linhas: int = 0)
             bruto = "\n".join(linhas[ini:fim]).strip()
             return rx_remover_ancora.sub("", bruto)
     return None
+
+
+# ---------- resolução aproximada de id_obra ----------
+def resolver_id_aproximado(consulta: str, obras: list[Obra], n: int = 5) -> tuple[Optional[Obra], list[Obra]]:
+    """
+    Devolve (obra_exata_ou_unica, sugestões).
+      - id exato                       -> (obra, [])
+      - id 'quase' (com prefixo de pasta, substring única no id ou título)
+                                       -> (obra, [])  [resolvido sozinho]
+      - várias possibilidades          -> (None, [candidatas...])
+      - nada parecido                  -> (None, [])
+    """
+    alvo_cru = consulta.strip()
+    exata = next((o for o in obras if o.id == alvo_cru), None)
+    if exata:
+        return exata, []
+
+    # 'Livro/hobbes-leviathan-latin-1668' -> tenta também só o último segmento
+    ultimo_segmento = alvo_cru.split("/")[-1].strip()
+    if ultimo_segmento != alvo_cru:
+        exata = next((o for o in obras if o.id == ultimo_segmento), None)
+        if exata:
+            return exata, []
+
+    alvo = _sem_acentos(ultimo_segmento.lower())
+    if not alvo:
+        return None, []
+
+    contem = [
+        o for o in obras
+        if alvo in _sem_acentos(o.id.lower())
+        or alvo in _sem_acentos((o.titulo + " " + o.autor).lower())
+    ]
+    if len(contem) == 1:
+        return contem[0], []
+    if 1 < len(contem) <= max(n, 8):
+        return None, contem[:n]
+
+    universo: dict[str, Obra] = {}
+    for o in obras:
+        universo.setdefault(_sem_acentos(o.id.lower()), o)
+        universo.setdefault(_sem_acentos(o.titulo.lower()), o)
+    proximos = get_close_matches(alvo, list(universo.keys()), n=n, cutoff=0.6)
+    sugestoes: list[Obra] = []
+    for p in proximos:
+        o = universo[p]
+        if o not in sugestoes:
+            sugestoes.append(o)
+    return None, sugestoes
+
+
+def _limpar_citacao_classica(citacao: str) -> str:
+    """'Leviathan cap. 13' -> 'Leviathan'; 'Sofista 216a' -> 'Sofista'.
+    Remove coordenadas do fim para sobrar só o provável título."""
+    t = citacao.strip()
+    t = re.sub(r"\b(cap[íi]tulo|cap|livro|liv|parte|se[cç][aã]o)\b\.?\s*[ivxlcdm\d]*\s*$", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"[\d:.,;\-–—]+\s*[a-e]?\s*$", "", t)
+    return t.strip()
+
+
+# ---------- lógica compartilhada da ferramenta ler_trecho_exato ----------
+# Os DOIS servidores (stdio e HTTP) chamam esta função — a lógica vive num
+# lugar só; os servidores viram cascas finas de transporte.
+def ferramenta_ler_trecho(cliente: ClientePedraAngular, id_obra: str = "", citacao: str = "") -> str:
+    obras = cliente.catalogo()
+
+    # ---- caminho 1: citação natural ----
+    if citacao and not id_obra:
+        resolvido = resolver_citacao(citacao, obras)
+        if resolvido is not None:
+            candidatos = resolvido["candidatos"]
+            if len(candidatos) > 1:
+                linhas = [f"'{citacao}' bate com mais de uma tradução — escolha uma (id_obra):"]
+                for c in candidatos:
+                    linhas.append(f"  - [{c.id}] {c.titulo}")
+                return "\n".join(linhas)
+            obra = candidatos[0]
+            bruto = cliente.conteudo_bruto(obra.arquivo)
+            meta, corpo = separar_frontmatter(bruto)
+            trecho = extrair_citacao_biblica(
+                corpo, resolvido["abrev"], resolvido["cap"],
+                resolvido["v_ini"], resolvido["v_fim"],
+            )
+            if trecho is None:
+                return (f"Obra encontrada ({obra.titulo}), mas a coordenada "
+                        f"{resolvido['abrev']} {resolvido['coordenada']} não achou "
+                        f"correspondência no texto (capítulo/versículo existe nessa tradução?).")
+            return (f"OBRA: {meta.get('title', obra.titulo)}  [{resolvido['abrev']} {resolvido['coordenada']}]\n"
+                    f"TRADUÇÃO: {meta.get('translation') or meta.get('translator')}\n"
+                    f"FONTE: {meta.get('source')}\n"
+                    f"LICENÇA: {meta.get('license', '(ver source)')}\n---\n" + trecho)
+
+        # não é citação bíblica -> fallback: tenta casar com título de obra clássica
+        palpite = _limpar_citacao_classica(citacao)
+        obra_unica, sugestoes = resolver_id_aproximado(palpite, obras) if palpite else (None, [])
+        if obra_unica is not None:
+            return ferramenta_ler_trecho(cliente, id_obra=obra_unica.id)
+        if sugestoes:
+            linhas = [
+                f"Não reconheci '{citacao}' como citação bíblica, mas parece "
+                f"referir-se a uma destas obras (use ler_trecho_exato com o id):"
+            ]
+            for o in sugestoes:
+                linhas.append(f"  - [{o.id}] {o.titulo} — {o.autor}")
+            return "\n".join(linhas)
+        return (f"Não reconheci '{citacao}' como citação bíblica (ex.: 'Gn 1:1', "
+                f"'gênesis 1,1', 'salmos 23') nem casei com título de obra do catálogo. "
+                f"Para obras clássicas, use id_obra (via listar_filhos ou buscar_no_corpus).")
+
+    # ---- caminho 2: por id (agora com resolução aproximada) ----
+    if not id_obra:
+        return "Informe id_obra ou citacao."
+    obra, sugestoes = resolver_id_aproximado(id_obra, obras)
+    if obra is None:
+        if sugestoes:
+            linhas = [f"Nenhuma obra com id exato '{id_obra}'. Você quis dizer:"]
+            for o in sugestoes:
+                linhas.append(f"  - [{o.id}] {o.titulo} — {o.autor}")
+            return "\n".join(linhas)
+        return f"Nenhuma obra com id='{id_obra}' no catálogo (nem nada parecido)."
+    aviso = "" if obra.id == id_obra.strip() else f"(id aproximado: pedi '{id_obra}', usei '{obra.id}')\n"
+    try:
+        bruto = cliente.conteudo_bruto(obra.arquivo)
+    except Exception as e:
+        return f"Erro ao buscar o arquivo: {e}"
+    meta, corpo = separar_frontmatter(bruto)
+    return (aviso +
+            f"OBRA: {meta.get('title', obra.titulo)}\n"
+            f"AUTOR: {meta.get('author', obra.autor)}\n"
+            f"TRADUÇÃO: {meta.get('translation') or meta.get('translator')}\n"
+            f"FONTE: {meta.get('source')}\n"
+            f"LICENÇA: {meta.get('license', '(ver source)')}\n---\n" + corpo.strip())
